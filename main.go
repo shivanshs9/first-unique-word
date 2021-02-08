@@ -11,10 +11,10 @@ import (
 	bytesize "github.com/inhies/go-bytesize"
 )
 
-const MaxMemLimit = 300 * bytesize.B
+const MaxMemLimit = 10 * bytesize.MB
 
 var SizeReadBuffer = bytesize.New(0.4 * float64(MaxMemLimit))
-var SizeLRUCache = bytesize.New(0.2 * float64(MaxMemLimit))
+var SizeLRUCache = bytesize.New(0.4 * float64(MaxMemLimit))
 
 type ReadSeekCloser interface {
 	io.Reader
@@ -96,6 +96,7 @@ func findUniqueFromStream(reader ReadSeekCloser) string {
 			}
 		}
 		if isEOF {
+			fmt.Println("Ended read goroutine")
 			close(wordStream)
 			reader.Close()
 			break

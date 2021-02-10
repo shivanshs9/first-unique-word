@@ -1,25 +1,37 @@
 package main
 
 import (
-	"container/list"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"strings"
+	"sync"
 
 	bytesize "github.com/inhies/go-bytesize"
 )
 
 const MaxMemLimit = 10 * bytesize.MB
+const AvgWordLength = 10
 
 var SizeReadBuffer = bytesize.New(0.4 * float64(MaxMemLimit))
-var SizeLRUCache = bytesize.New(0.4 * float64(MaxMemLimit))
+var SizeLRUCache = bytesize.New(0.2 * float64(MaxMemLimit))
+var NumWorkers = int((MaxMemLimit-SizeReadBuffer)/SizeLRUCache) - 1
+var WordsPerWorker = int(SizeLRUCache) / AvgWordLength
+
+var workerLog = log.New(os.Stdout, "[WORKER] ", log.LstdFlags)
 
 type ReadSeekCloser interface {
 	io.Reader
 	io.Seeker
 	io.Closer
+}
+
+type wordProcessor struct {
+	wordStreams []chan input
+	wg          sync.WaitGroup
+	results     chan output
+	doneCtr     int
 }
 
 /*
@@ -47,38 +59,26 @@ func trimContentToWords(input string, isEOF bool) (output []string, length int) 
 	return
 }
 
-func processWords(wordStream <-chan string, result chan<- string) {
-	lruQueue := list.New()
-	wordFreq := WordHashSet{}
-	for word := range wordStream {
-		if wordFreq.Has(word) {
-			for e := lruQueue.Front(); e != nil; e = e.Next() {
-				if e.Value == word {
-					lruQueue.Remove(e)
-					break
-				}
-			}
-		} else {
-			wordFreq.Add(word)
-			lruQueue.PushBack(word)
-		}
+func (proc *wordProcessor) Close() {
+	for _, stream := range proc.wordStreams {
+		close(stream)
 	}
-	result <- lruQueue.Front().Value.(string)
 }
 
-func findUniqueFromStream(reader ReadSeekCloser) string {
+func (proc *wordProcessor) readFromStream(reader ReadSeekCloser) {
+	defer func() {
+		log.Println("Ended read goroutine")
+		proc.Close()
+		reader.Close()
+	}()
 	buffer := make([]byte, int(SizeReadBuffer))
 	isEOF := false
-
-	wordStream := make(chan string, int(SizeLRUCache))
-	result := make(chan string)
-	go processWords(wordStream, result)
-
+	ctr := 0
 	for {
 		n, err := reader.Read(buffer)
 		if err != nil {
 			if err == io.EOF {
-				fmt.Println("Read complete")
+				log.Println("Read complete")
 				isEOF = true
 			} else {
 				log.Fatal(err)
@@ -86,26 +86,52 @@ func findUniqueFromStream(reader ReadSeekCloser) string {
 		}
 		words, newLen := trimContentToWords(string(buffer[:n]), isEOF)
 		for _, word := range words {
-			wordStream <- word
+			if ctr >= WordsPerWorker {
+				ctr = 0
+				proc.doneCtr++
+				workerLog.Println("Moving to next worker: ", proc.doneCtr%NumWorkers)
+			}
+			proc.wordStreams[proc.doneCtr%NumWorkers] <- input{
+				word:      word,
+				partition: proc.doneCtr,
+			}
+			ctr++
 		}
 		if !isEOF && newLen != n {
-			fmt.Printf("Backtrack from %d to %d\n", n, newLen)
+			log.Printf("Backtrack from %d to %d\n", n, newLen)
 			_, err = reader.Seek(int64(newLen-n), io.SeekCurrent)
 			if err != nil {
 				log.Fatal(err)
 			}
 		}
 		if isEOF {
-			fmt.Println("Ended read goroutine")
-			close(wordStream)
-			reader.Close()
 			break
 		}
 	}
-	return <-result
+}
+
+func findUniqueFromStream(reader ReadSeekCloser) string {
+	proc := &wordProcessor{
+		wordStreams: make([]chan input, NumWorkers),
+		results:     make(chan output),
+	}
+	go func() {
+		for i := 0; i < NumWorkers; i++ {
+			proc.wordStreams[i] = make(chan input, WordsPerWorker)
+			proc.wg.Add(1)
+			go proc.processWordsWorker(i)
+		}
+		proc.wg.Wait()
+		close(proc.results)
+	}()
+
+	result := proc.getUniqueResult()
+	go proc.readFromStream(reader)
+	return (<-result).word
 }
 
 func main() {
+	log.SetPrefix("[MAIN] ")
 	if len(os.Args) < 2 {
 		log.Fatal("Invalid use -- Provide a filename")
 	}
@@ -116,5 +142,5 @@ func main() {
 	}
 	fmt.Printf("File size: %s\n", reader.Size)
 	result := findUniqueFromStream(reader)
-	fmt.Printf("Result: %s\n", result)
+	log.Printf("Result: %s\n", result)
 }

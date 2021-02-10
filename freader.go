@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"io"
+	"log"
 	"os"
 
 	"github.com/inhies/go-bytesize"
@@ -40,7 +40,7 @@ func (reader *fileReader) Read(buffer []byte) (read int, err error) {
 	read, err = reader.filePtr.Read(buffer)
 	if read != 0 {
 		reader.bytesRead += int64(read)
-		fmt.Printf("%.2f%% complete: Read %s\n", float64(reader.bytesRead*100)/float64(reader.Size), bytesize.New(float64(reader.bytesRead)))
+		log.Printf("%.2f%% complete: Read %s\n", float64(reader.bytesRead*100)/float64(reader.Size), bytesize.New(float64(reader.bytesRead)))
 	}
 	if err == nil && reader.bytesRead == int64(reader.Size) {
 		err = io.EOF

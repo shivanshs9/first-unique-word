@@ -9,15 +9,12 @@ import (
 	"strings"
 
 	bytesize "github.com/inhies/go-bytesize"
+	"github.com/pkg/profile"
 )
 
-const MaxMemLimit = 10 * bytesize.MB
-const AvgWordLength = 10
+const MaxMemLimit = 16 * bytesize.GB
 
 var SizeReadBuffer = bytesize.New(0.4 * float64(MaxMemLimit))
-var SizeLRUCache = bytesize.New(0.2 * float64(MaxMemLimit))
-var NumWorkers = int((MaxMemLimit-SizeReadBuffer)/SizeLRUCache) - 1
-var WordsPerWorker = int(SizeLRUCache) / AvgWordLength
 
 type ReadSeekCloser interface {
 	io.Reader
@@ -129,6 +126,7 @@ func (proc *wordProcessor) findUniqueFromStream(reader ReadSeekCloser) string {
 }
 
 func main() {
+	defer profile.Start(profile.MemProfile).Stop()
 	log.SetPrefix("[MAIN] ")
 	if len(os.Args) < 2 {
 		log.Fatal("Invalid use -- Provide a filename")
@@ -146,4 +144,14 @@ func main() {
 	}
 	result := proc.findUniqueFromStream(reader)
 	log.Printf("Result: %s\n", result)
+
+	// runtime.GC()
+	// memProfile, err := os.Create(fmt.Sprintf("%s.prof", inputFile))
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// defer memProfile.Close()
+	// if err := pprof.WriteHeapProfile(memProfile); err != nil {
+	// 	log.Fatal(err)
+	// }
 }

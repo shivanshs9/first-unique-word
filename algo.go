@@ -21,11 +21,14 @@ func removeDuplicates(sourceWords *list.List, nextWords []string) {
 	// modList.PushBackList(sourceWords)
 	// sourceWords.Init()
 	remElems := sourceWords.Len()
-	for word := popFront(sourceWords); remElems > 0; word = popFront(sourceWords) {
+	for word := popFront(sourceWords); remElems > 0; {
 		if !dupWords.Has(word.(string)) {
 			sourceWords.PushBack(word)
 		}
 		remElems--
+		if remElems > 0 {
+			word = popFront(sourceWords)
+		}
 	}
 }
 
@@ -35,8 +38,8 @@ func getOnlyUnique(words []string) *list.List {
 		freqWords[word]++
 	}
 	wordsList := list.New()
-	for word, freq := range freqWords {
-		if freq == 1 {
+	for _, word := range words {
+		if freqWords[word] == 1 {
 			wordsList.PushBack(word)
 		}
 	}

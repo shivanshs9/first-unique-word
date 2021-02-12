@@ -69,8 +69,8 @@ func (proc *wordProcessor) getWordsPartition(partitionIdx int, reader ReadSeekCl
 		}
 	}
 	var input string
-	if endByte != 0 && endByte < int64(n) {
-		input = string(buffer[:endByte])
+	if endByte != 0 && (endByte-startByte) < int64(n) {
+		input = string(buffer[:endByte-startByte])
 	} else {
 		input = string(buffer[:n])
 	}
@@ -97,12 +97,13 @@ func (proc *wordProcessor) readFromStream(reader ReadSeekCloser) (result string)
 			break
 		}
 		wordsList := getOnlyUnique(sourceWords)
-		for nextPartition := sourcePartition + 1; nextPartition <= proc.numPartitions; nextPartition++ {
+		for nextPartition := 1; nextPartition <= proc.numPartitions; nextPartition++ {
 			if nextPartition == sourcePartition {
 				continue
 			}
 			log.Println("Next Partition: ", nextPartition)
 			if wordsList.Len() < 1 {
+				log.Println("list emptied")
 				break
 			}
 			nextWords, err := proc.getWordsPartition(nextPartition, reader, buffer)
@@ -111,7 +112,6 @@ func (proc *wordProcessor) readFromStream(reader ReadSeekCloser) (result string)
 			}
 			removeDuplicates(wordsList, nextWords)
 		}
-		log.Println(wordsList.Len())
 		if wordsList.Len() > 0 {
 			result = wordsList.Front().Value.(string)
 			break
@@ -139,7 +139,7 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("File size: %s\n", reader.Size)
-	numPartitions := int(math.Ceil(float64(reader.Size) / float64(SizeReadBuffer)))
+	numPartitions := int(math.Ceil(float64(reader.Size)/float64(SizeReadBuffer))) + 1
 	proc := &wordProcessor{
 		numPartitions: numPartitions,
 		partitions:    make([]int64, numPartitions+1),

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"strings"
-	"sync"
 
 	bytesize "github.com/inhies/go-bytesize"
 )
@@ -19,8 +19,6 @@ var SizeLRUCache = bytesize.New(0.2 * float64(MaxMemLimit))
 var NumWorkers = int((MaxMemLimit-SizeReadBuffer)/SizeLRUCache) - 1
 var WordsPerWorker = int(SizeLRUCache) / AvgWordLength
 
-var workerLog = log.New(os.Stdout, "[WORKER] ", log.LstdFlags)
-
 type ReadSeekCloser interface {
 	io.Reader
 	io.Seeker
@@ -28,106 +26,106 @@ type ReadSeekCloser interface {
 }
 
 type wordProcessor struct {
-	wordStreams []chan input
-	wg          sync.WaitGroup
-	results     chan output
-	doneCtr     int
+	numPartitions int
+	partitions    []int64
 }
 
 /*
 	Reads the string, exclusive of the last character
 */
-func trimContentToWords(input string, isEOF bool) (output []string, length int) {
-	strLen := len(input)
+func trimContentToWords(input string, noChangeLength bool) (output []string, diff int) {
 	output = strings.Fields(input)
-	splitLen := len(output)
-	diff := 0
-	if isEOF {
-		length = strLen
+	diff = 0
+	if noChangeLength {
 		return
 	}
-	if input[strLen-2] != ' ' {
-		if input[strLen-1] != ' ' {
-			diff = len(output[splitLen-1])
-			output = output[:splitLen-1]
-		}
-	} else if input[strLen-1] != ' ' {
-		diff = len(output[splitLen-1])
+	strLen := len(input)
+	splitLen := len(output)
+	if input[strLen-1] != ' ' {
+		diff = -len(output[splitLen-1])
 		output = output[:splitLen-1]
 	}
-	length = strLen - diff
 	return
 }
 
-func (proc *wordProcessor) Close() {
-	for _, stream := range proc.wordStreams {
-		close(stream)
+func (proc *wordProcessor) getWordsPartition(partitionIdx int, reader ReadSeekCloser, buffer []byte) ([]string, error) {
+	startByte := int64(0)
+	if partitionIdx > 0 {
+		startByte = proc.partitions[partitionIdx-1]
 	}
+	endByte := proc.partitions[partitionIdx]
+	reader.Seek(startByte, io.SeekStart)
+	n, err := reader.Read(buffer)
+	var isEOF bool
+	if err != nil {
+		if err == io.EOF {
+			isEOF = true
+			if n == 0 {
+				log.Println("Read complete")
+				return nil, err
+			}
+		} else {
+			log.Fatal(err)
+		}
+	}
+	var input string
+	if endByte != 0 && endByte < int64(n) {
+		input = string(buffer[:endByte])
+	} else {
+		input = string(buffer[:n])
+	}
+	words, diff := trimContentToWords(input, isEOF || endByte != 0)
+	if endByte == 0 {
+		proc.partitions[partitionIdx] = startByte + int64(n+diff)
+	}
+	if diff != 0 {
+		log.Printf("Backtrack from %d to %d\n", startByte+int64(n), proc.partitions[partitionIdx])
+	}
+	return words, nil
 }
 
-func (proc *wordProcessor) readFromStream(reader ReadSeekCloser) {
+func (proc *wordProcessor) readFromStream(reader ReadSeekCloser) (result string) {
 	defer func() {
 		log.Println("Ended read goroutine")
-		proc.Close()
 		reader.Close()
 	}()
 	buffer := make([]byte, int(SizeReadBuffer))
-	isEOF := false
-	ctr := 0
-	for {
-		n, err := reader.Read(buffer)
-		if err != nil {
+	for sourcePartition := 1; sourcePartition <= proc.numPartitions; sourcePartition++ {
+		log.Println("Source Partition: ", sourcePartition)
+		sourceWords, err := proc.getWordsPartition(sourcePartition, reader, buffer)
+		if err == io.EOF {
+			break
+		}
+		wordsList := getOnlyUnique(sourceWords)
+		for nextPartition := sourcePartition + 1; nextPartition <= proc.numPartitions; nextPartition++ {
+			if nextPartition == sourcePartition {
+				continue
+			}
+			log.Println("Next Partition: ", nextPartition)
+			if wordsList.Len() < 1 {
+				break
+			}
+			nextWords, err := proc.getWordsPartition(nextPartition, reader, buffer)
 			if err == io.EOF {
-				log.Println("Read complete")
-				isEOF = true
-			} else {
-				log.Fatal(err)
+				break
 			}
+			removeDuplicates(wordsList, nextWords)
 		}
-		words, newLen := trimContentToWords(string(buffer[:n]), isEOF)
-		for _, word := range words {
-			if ctr >= WordsPerWorker {
-				ctr = 0
-				proc.doneCtr++
-				workerLog.Println("Moving to next worker: ", proc.doneCtr%NumWorkers)
-			}
-			proc.wordStreams[proc.doneCtr%NumWorkers] <- input{
-				word:      word,
-				partition: proc.doneCtr,
-			}
-			ctr++
-		}
-		if !isEOF && newLen != n {
-			log.Printf("Backtrack from %d to %d\n", n, newLen)
-			_, err = reader.Seek(int64(newLen-n), io.SeekCurrent)
-			if err != nil {
-				log.Fatal(err)
-			}
-		}
-		if isEOF {
+		log.Println(wordsList.Len())
+		if wordsList.Len() > 0 {
+			result = wordsList.Front().Value.(string)
 			break
 		}
 	}
+	return
 }
 
-func findUniqueFromStream(reader ReadSeekCloser) string {
-	proc := &wordProcessor{
-		wordStreams: make([]chan input, NumWorkers),
-		results:     make(chan output),
+func (proc *wordProcessor) findUniqueFromStream(reader ReadSeekCloser) string {
+	result := proc.readFromStream(reader)
+	if result == "" {
+		return "None found"
 	}
-	go func() {
-		for i := 0; i < NumWorkers; i++ {
-			proc.wordStreams[i] = make(chan input, WordsPerWorker)
-			proc.wg.Add(1)
-			go proc.processWordsWorker(i)
-		}
-		proc.wg.Wait()
-		close(proc.results)
-	}()
-
-	result := proc.getUniqueResult()
-	go proc.readFromStream(reader)
-	return (<-result).word
+	return result
 }
 
 func main() {
@@ -141,6 +139,11 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("File size: %s\n", reader.Size)
-	result := findUniqueFromStream(reader)
+	numPartitions := int(math.Ceil(float64(reader.Size) / float64(SizeReadBuffer)))
+	proc := &wordProcessor{
+		numPartitions: numPartitions,
+		partitions:    make([]int64, numPartitions+1),
+	}
+	result := proc.findUniqueFromStream(reader)
 	log.Printf("Result: %s\n", result)
 }

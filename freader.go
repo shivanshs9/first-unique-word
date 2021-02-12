@@ -49,9 +49,12 @@ func (reader *fileReader) Read(buffer []byte) (read int, err error) {
 }
 
 func (reader *fileReader) Seek(offset int64, whence int) (int64, error) {
-	if whence == 1 {
+	if whence == io.SeekCurrent {
 		reader.bytesRead += offset
+	} else if whence == io.SeekStart {
+		reader.bytesRead = offset
 	}
+	log.Printf("Seek to %d", reader.bytesRead)
 	return reader.filePtr.Seek(offset, whence)
 }
 

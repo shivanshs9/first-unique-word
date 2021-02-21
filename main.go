@@ -125,6 +125,10 @@ func (proc *wordProcessor) findUniqueFromStream(reader ReadSeekCloser) string {
 	return result
 }
 
+func calculatePartitions(fileSize bytesize.ByteSize) int {
+	return int(math.Ceil(float64(fileSize)/float64(SizeReadBuffer))) + 1
+}
+
 func main() {
 	defer profile.Start(profile.MemProfile).Stop()
 	log.SetPrefix("[MAIN] ")
@@ -137,7 +141,7 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("File size: %s\n", reader.Size)
-	numPartitions := int(math.Ceil(float64(reader.Size)/float64(SizeReadBuffer))) + 1
+	numPartitions := calculatePartitions(reader.Size)
 	proc := &wordProcessor{
 		numPartitions: numPartitions,
 		partitions:    make([]int64, numPartitions+1),
